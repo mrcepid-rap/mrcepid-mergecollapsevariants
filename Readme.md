@@ -93,6 +93,14 @@ See `dxapp.json` for how this is implemented for this applet.
 This list is not exhaustive and does not include dependencies of dependencies and software needed
 to acquire other resources (e.g. wget). See the referenced Dockerfile for more information.
 
+I have written a custom script for generating a file that we need to run the tool [STAAR](https://github.com/xihaoli/STAAR). 
+This custom script is placed into the directory:
+
+`resources/usr/bin`
+
+and in accordance with dependency [instructions](https://documentation.dnanexus.com/developer/apps/dependency-management/asset-build-process)
+from DNANexus, all resources stored in this folder are then included with the built app at `/usr/bin/` on the launched AWS instance.
+
 #### Resource Files
 
 This applet does not have any external dependencies.
