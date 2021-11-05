@@ -1,0 +1,70 @@
+{
+  "name": "mrcepid-mergecollapsevariants",
+  "title": "MergeCollapseVariants",
+  "summary": "Generates merged dummy input files for various association testing software",
+  "dxapi": "1.0.0",
+  "version": "0.0.1",
+  "inputSpec": [
+    {
+      "name": "input_vcf_list",
+      "label": "list of input TARBALL files that have been processed with mrcepid-collapsevariants",
+      "class": "file",
+      "optional": false,
+      "patterns": [
+        "*.vcf.gz"
+      ],
+      "help": "A list file (NOT a file:array) that has one line per file you would like to merge together"
+    },
+    {
+      "name": "file_prefix",
+      "label": "name to append to beginning of output files.",
+      "class": "string",
+      "optional": false,
+      "help": "A prefix describing the variant type. MUST be the same as the prefix used for input_vcf_list and when running mrcepid-collapsevariants"
+    }
+  ],
+  "outputSpec": [
+    {
+      "name": "output_tarball",
+      "label": "Output tarball of all files for association testing",
+      "class": "file",
+      "optional": false,
+      "patterns": [
+        "*.tar.gz"
+      ],
+      "help": "Single merged output .tar.gz file for running mrcepid-runassocationtesting"
+    }
+  ],
+  "access": {
+    "network": [
+      "*"
+    ]
+  },
+  "runSpec": {
+    "timeoutPolicy": {
+      "*": {
+        "hours": 12
+      }
+    },
+    "interpreter": "python3",
+    "file": "src/mrcepid-mergecollapsevariants.py",
+    "distribution": "Ubuntu",
+    "release": "20.04",
+    "version": "0",
+    "execDepends": [
+      {"name": "pandas",
+      "package_manager": "pip"},
+      {"name": "tabix",
+      "package_manager": "apt"}
+    ]
+  },
+  "regionalOptions": {
+    "aws:eu-west-2": {
+      "systemRequirements": {
+        "*": {
+          "instanceType": "mem1_ssd1_v2_x16"
+        }
+      }
+    }
+  }
+}
