@@ -18,6 +18,11 @@ from os.path import exists
 from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor
 
+# Set a global list of chromosomes
+CHROMOSOMES = list(range(1,23)) # Is 0 based on the right coordinate...? (So does 1..22)
+CHROMOSOMES.extend(['X','Y'])
+CHROMOSOMES = list(map(str, CHROMOSOMES))
+
 
 # This function runs a command on an instance, either with or without calling the docker instance we downloaded
 # By default, commands are not run via Docker, but can be changed by setting is_docker = True
@@ -52,6 +57,12 @@ def purge_file(file: str) -> None:
     run_cmd(cmd)
 
 
+# This is a helper function that will run a single chromosome through each of four merging/file creation steps
+# It performs the following functions:
+# 1. Checks if each provided vcf file contains the correct chromosome
+# 2. Downloads relevant annotation files
+# 3. Performs merging
+# This function is intended to be run as a 'thread' using a ThreadPoolExecutor to enable parallelisation of chromosomes
 def run_chromosome(chr: str, input_vcfs: list, file_prefix: str) -> None:
 
     print("Running chromosome " + chr + "...")
@@ -281,6 +292,10 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str
     cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --bfile /test/" + file_prefix + "." + chr + ".BOLT --out /test/" + file_prefix + "." + chr + ".BOLT"
     run_cmd(cmd, True)
 
+    # Here we also create the bgen file for doing per-marker tests. This is the easy bit...
+    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --pfile /test/" + file_prefix + "." + chr + ".REGENIE --out /test/" + file_prefix + "." + chr + ".BOLT.markers"
+    run_cmd(cmd, True)
+
     # Purge unecessary intermediate files to save space on the AWS instance:
     purge_file(file_prefix + "." + chr + '.BOLT.ped')
     purge_file(file_prefix + "." + chr + '.BOLT.map')
@@ -410,13 +425,10 @@ def main(input_vcf_list, file_prefix, threads):
     # Set up a Thread Pool for parellelising per-chromosome merging
     available_workers = threads - 1
     executor = ThreadPoolExecutor(max_workers=available_workers)
-    chromosomes = list(range(1,23)) # Is 0 based on the right coordinate...? (So does 1..22)
-    chromosomes.extend(['X','Y'])
 
     # And launch the requested threads
     future_pool = []
-    for chromosome in chromosomes:
-        chromosome = str(chromosome)
+    for chromosome in CHROMOSOMES:
         future_pool.append(executor.submit(run_chromosome,
                                            chr = chromosome,
                                            input_vcfs = input_vcfs,

@@ -113,7 +113,7 @@ RAP at the MRC Epidemiology Unit:
 ![](https://github.com/mrcepid-rap/.github/blob/main/images/RAPPipeline.png)
 
 This applet has four functions which perform merging to generate files required for final rare variant association testing.
-For the purposes of brevity I am not going to go into length detail about these files here and the methodology used to 
+For the purposes of brevity I am not going to go into detail about these files here, or the methodology used to 
 create them. Details can be found in the commented source code available at `src/mrcepid-mergecollapsevariants.py` of this repository.
 Full descriptions of these files as input to individual association tests can be found as part of the repository for 
 mrcepid-runassociationtesting:
