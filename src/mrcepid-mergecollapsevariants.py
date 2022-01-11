@@ -14,6 +14,9 @@ import json
 import pandas as pd
 import tarfile
 import glob
+from os.path import exists
+from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor
 
 
 # This function runs a command on an instance, either with or without calling the docker instance we downloaded
@@ -31,7 +34,6 @@ def run_cmd(cmd: str, is_docker: bool = False):
               "egardner413/mrcepid-associationtesting " + cmd
 
     # Standard python calling external commands protocol
-    print(cmd)
     proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = proc.communicate()
 
@@ -46,8 +48,47 @@ def run_cmd(cmd: str, is_docker: bool = False):
 
 # Utility function to delete files no longer needed from the AWS instance to save space
 def purge_file(file: str) -> None:
-    cmd = "rm " + file
+    cmd = "rm -f " + file
     run_cmd(cmd)
+
+
+def run_chromosome(chr: str, input_vcfs: list, file_prefix: str) -> None:
+
+    print("Running chromosome " + chr + "...")
+    # First decide which vcfs are on this chromosome...
+    current_chr_vcf_list = []
+    chr_search_string = '_c' + chr + '_'
+    total_files = 0
+    for vcfs in input_vcfs:
+        if chr_search_string in vcfs['local_name']:
+
+            current_vcf_pack = dxpy.DXFile(vcfs['filehandle'])
+            dxpy.download_dxfile(dxid=current_vcf_pack.get_id(),
+                                 filename=vcfs['local_name'])
+            vcf_prefix = vcfs['local_name'].rstrip("." + file_prefix + ".tar.gz")
+
+            # Extract contents of the tarball into the root directory:
+            tar = tarfile.open(vcfs['local_name'])
+            tar.extractall()
+            tar.close()
+
+            # Check to see if the tar was a dummy file due to no variants being found:
+            dummy_file = vcf_prefix + '.dummy'
+
+            # And add the actual name of the VCF file to our list if the dummy file DOESN'T exist
+            if exists(dummy_file) is False:
+                total_files+=1
+                current_chr_vcf_list.append(vcf_prefix)
+
+    print("Total files found for %s : %i" % (chr, total_files))
+
+    # Here we are generating file inputs for each of the tools that we want to run in mrcepid-runannotationtesting
+    # Note that I have a function here for REGENIE – we don't run REGENIE and this is here for legacy purposes
+    # because some of the other tools (notably SAIGE) use these files as input so I am keeping for now
+    genes = merge_REGENIE(current_chr_vcf_list, file_prefix, chr) # REGENIE
+    merge_BOLT(current_chr_vcf_list, file_prefix, genes, chr) # BOLT
+    merge_SAIGE(file_prefix, chr)  # For SAIGE we can use the input for REGENIE to generate bgen files
+    merge_STAAR(current_chr_vcf_list, file_prefix, chr) # STAAR
 
 
 # Make REGENIE-specific input files
@@ -55,25 +96,25 @@ def purge_file(file: str) -> None:
 # now used as inputs for other tools
 # The primary output of this function is 5 files:
 # 1. <file_prefix>.REGENIE.annotation – a tsv of chr / pos / id / gene / annotation of ALL variants being assessed
-# 2. <file_prefix>.REGENIE.inclusion - a list of all possible genes (by ENSG) for rare variant testing
-# 3. <file_prefix>.REGENIE.setFile - a file of ENSG / chr / pos / variant IDs for all possible genes for rare variant testing
-# 4. <file_prefix>.SAIGE.groupFile.txt – similar to setFile but just ENSG / variant IDs for all possible genes for rare variant testing
+# 2. <file_prefix>.REGENIE.inclusion - a list of all possible genes (by ENST) for rare variant testing
+# 3. <file_prefix>.REGENIE.setFile - a file of ENST / chr / pos / variant IDs for all possible genes for rare variant testing
+# 4. <file_prefix>.SAIGE.groupFile.txt – similar to setFile but just ENST / variant IDs for all possible genes for rare variant testing
 # 5. <file_prefix>.REGENIE.mask – a file that just contains the "file_prefix"
-def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
+def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
 
     # Make a file list for plink to merge all .pgen files into a single pgen file of the entire genome
     # This is formated to be compatible with the --pmerge-list flag of plink2 as shown below. This is just one
     # file per line.
-    merge_list = open('merge_list.txt', 'w')
+    merge_list = open('merge_list.' + chr + '.txt', 'w')
     for vcf in input_vcfs:
-        plink_name = vcf + ".REGENIE"
+        plink_name = vcf + "." + file_prefix + ".REGENIE"
         merge_list.write("/test/" + plink_name + "\n")
     merge_list.close()
 
     # Run plink2 to merge all .pgen files ingested into this applet into a single .pgen file
-    cmd = "plink2 --pmerge-list /test/merge_list.txt --out /test/" + file_prefix + ".REGENIE"
+    cmd = "plink2 --threads 1 --pmerge-list /test/merge_list." + chr + ".txt --out /test/" + file_prefix + "." + chr + ".REGENIE"
     run_cmd(cmd, True)
-    purge_file(file_prefix + ".REGENIE.log")
+    purge_file(file_prefix + "." + chr + ".REGENIE.log")
 
     # Make a dictionary that will store information about each gene listed in annotation files
     # This will have three pieces of information:
@@ -84,7 +125,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
 
     # Here we are both reading in information for each variant from individual vcf.tar.gz files AND outputting the master
     # list of all variants that will be included for rare variant burden testing
-    output_annotation = open(file_prefix + ".REGENIE.annotation", "w")
+    output_annotation = open(file_prefix + "." + chr + ".REGENIE.annotation", "w")
     output_csv = csv.DictWriter(output_annotation, delimiter="\t", fieldnames=['id', 'gene', 'annotation'],
                                 extrasaction='ignore')
 
@@ -95,7 +136,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
     # 1. Store individual variant information
     # 2. Output variant information to a list file for rare variant burden testing
     for vcf in input_vcfs:
-        annotation_name = vcf + ".REGENIE.annotation.txt"
+        annotation_name = vcf + "." + file_prefix + ".REGENIE.annotation.txt"
         annotation_csv = csv.DictReader(open(annotation_name, 'r', newline='\n'), delimiter="\t",
                                         fieldnames=['chr', 'pos', 'id', 'gene', 'annotation'], quoting=csv.QUOTE_NONE)
         # Store all variant information from the above file in the 'genes' dict
@@ -113,9 +154,9 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
     output_annotation.close()
 
     # Open file handles for output files
-    output_inclusion = open(file_prefix + ".REGENIE.inclusion", "w")
-    output_setfile_REGENIE = open(file_prefix + ".REGENIE.setfile", "w")
-    output_setfile_SAIGE = open(file_prefix + ".SAIGE.groupFile.txt", "w")
+    output_inclusion = open(file_prefix + "." + chr + ".REGENIE.inclusion", "w")
+    output_setfile_REGENIE = open(file_prefix + "." + chr + ".REGENIE.setfile", "w")
+    output_setfile_SAIGE = open(file_prefix + "." + chr + ".SAIGE.groupFile.txt", "w")
 
     # I know this is goofy, but also just going to do the file for SAIGE here to make it simple
     # We are iterating through all possible genes and writing them to the various output files listed above
@@ -143,7 +184,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
     if variant_type is None:
         raise Exception("Variant type was not found!")
     else:
-        output_mask = open(file_prefix + ".REGENIE.mask", "w")
+        output_mask = open(file_prefix + "." + chr + ".REGENIE.mask", "w")
         output_mask.write("Mask1 " + variant_type)
         output_mask.close()
 
@@ -153,7 +194,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str) -> dict:
 
 # Make BOLT-specific input files
 # The primary output of this function is a bgen format file (with associated .sample file)
-def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict) -> None:
+def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str) -> None:
 
     # Step 1 is to walk through each .json file created in mrcepid-collapsevariants and mash them together in a loop
     merged_json = {}
@@ -168,7 +209,7 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict) -> None:
     # Note that ALL samples are listed, even if they did not have a qualifying variant
     for vcf in input_vcfs:
 
-        json_file = vcf + ".BOLT.json"
+        json_file = vcf + "." + file_prefix + ".BOLT.json"
         loaded_json = json.load(open(json_file, 'r')) # This function just loads a json file back into memory as a dict
         if len(merged_json) == 0:
             merged_json = loaded_json # If we are looping the first time through, we don't need to append and can just read directory into memory
@@ -198,9 +239,9 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict) -> None:
     # We have to write this first into plink .ped format and then convert to bgen for input into BOLT
     # We are tricking BOLT here by setting the individual "variants" within bolt to genes. So our map file
     # will be a set of genes, and if an individual has a qualifying variant within that gene, setting it to that value
-    output_map = open(file_prefix + '.BOLT.map', 'w')
-    output_ped = open(file_prefix + '.BOLT.ped', 'w')
-    output_fam = open(file_prefix + '.BOLT.fam', 'w')
+    output_map = open(file_prefix + "." + chr + '.BOLT.map', 'w')
+    output_ped = open(file_prefix + "." + chr + '.BOLT.ped', 'w')
+    output_fam = open(file_prefix + "." + chr + '.BOLT.fam', 'w')
     header = ['eid', 'eid'] + list(genes)
 
     # Make map file (just list of genes with the chromosome and start position of that gene):
@@ -234,38 +275,38 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict) -> None:
 
     # And convert to bgen
     # Have to use OG plink to get into .bed format first
-    cmd = 'plink --make-bed --file /test/' + file_prefix + '.BOLT --out /test/' + file_prefix + '.BOLT'
+    cmd = 'plink --threads 1 --make-bed --file /test/' + file_prefix + "." + chr + '.BOLT --out /test/' + file_prefix + "." + chr + '.BOLT'
     run_cmd(cmd, True)
     # And then use plink2 to make a bgen file
-    cmd = "plink2 --export bgen-1.2 'bits='8 --bfile /test/" + file_prefix + ".BOLT --out /test/" + file_prefix + ".BOLT"
+    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --bfile /test/" + file_prefix + "." + chr + ".BOLT --out /test/" + file_prefix + "." + chr + ".BOLT"
     run_cmd(cmd, True)
 
     # Purge unecessary intermediate files to save space on the AWS instance:
-    purge_file(file_prefix + '.BOLT.ped')
-    purge_file(file_prefix + '.BOLT.map')
-    purge_file(file_prefix + '.BOLT.fam')
-    purge_file(file_prefix + '.BOLT.bed')
-    purge_file(file_prefix + '.BOLT.bim')
-    purge_file(file_prefix + '.BOLT.log')
+    purge_file(file_prefix + "." + chr + '.BOLT.ped')
+    purge_file(file_prefix + "." + chr + '.BOLT.map')
+    purge_file(file_prefix + "." + chr + '.BOLT.fam')
+    purge_file(file_prefix + "." + chr + '.BOLT.bed')
+    purge_file(file_prefix + "." + chr + '.BOLT.bim')
+    purge_file(file_prefix + "." + chr + '.BOLT.log')
 
 
 # Make BOLT-specific input files
 # Remember, all we do here is write the bgen file for SAIGE from the REGENIE plink2 files.
 # The actual gene-wise information for SAIGE is done above in the REGENIE section
 # The primary output of this function is a vcf file and associated .csi index
-def merge_SAIGE(file_prefix: str) -> None:
+def merge_SAIGE(file_prefix: str, chr: str) -> None:
 
     # Convert the REGENIE pfile that we created into a VCF format file that SAIGE can use
-    cmd = "plink2 --pfile /test/" + file_prefix + ".REGENIE --export vcf --out /test/" + file_prefix + ".SAIGE"
+    cmd = "plink2 --threads 1 --pfile /test/" + file_prefix + "." + chr + ".REGENIE --export vcf --out /test/" + file_prefix + "." + chr + ".SAIGE"
     run_cmd(cmd, True)
-    purge_file(file_prefix + '.SAIGE.log')
+    purge_file(file_prefix + "." + chr + '.SAIGE.log')
 
     # bgzip...
-    cmd = "bgzip " + file_prefix + ".SAIGE.vcf"
+    cmd = "bgzip " + file_prefix + "." + chr + ".SAIGE.vcf"
     run_cmd(cmd)
 
     # ... and index!
-    cmd = "bcftools index /test/" + file_prefix + ".SAIGE.vcf.gz"
+    cmd = "bcftools index /test/" + file_prefix + "." + chr + ".SAIGE.vcf.gz"
     run_cmd(cmd, True)
 
 
@@ -273,26 +314,26 @@ def merge_SAIGE(file_prefix: str) -> None:
 # The primary output of this function is a single R rds format file of the format <file_prefix>.STAAR.matrix.rds
 # The goal of this script is to make inputs that can be provided to a script (at /resources/usr/bin/buildSTAARmatrix.R)
 # to make the single matrix for STAAR-based rare variant burden testing
-def merge_STAAR(input_vcfs, file_prefix):
+def merge_STAAR(input_vcfs, file_prefix, chr: str):
 
     # First we need a sorted set of variants across all VCFs
     iteration_num = 1
     sample_file = None
     variants = [] # This will be a list of pandas data frames that we concat together
-    matrix_file_list = open('matrix_files.txt', 'w') # iteratively write a list of matrix files so that we can read them in later
+    matrix_file_list = open('matrix_files.' + chr + '.txt', 'w') # iteratively write a list of matrix files so that we can read them in later
 
     for vcf in input_vcfs:
         # On the first iteration (iteration_num == 1), take this opportunity to grab a sample file to use for the rows
         # of the merged matrix:
         # I can get this from the REGENIE .psam file
         if iteration_num == 1:
-            sample_file = vcf + ".REGENIE.psam"
+            sample_file = vcf + "." + file_prefix + ".REGENIE.psam"
             iteration_num += 1
 
         # Now I need to ingest the lists of variants:
         # I can get this from the REGENIE .pvar file from each .tar.gz as we iterate through them
         # Read each in as a pandas dataframe and get the columns we actually care about
-        variant_ids = vcf + ".REGENIE.pvar"
+        variant_ids = vcf + "." + file_prefix + ".REGENIE.pvar"
         current_vars = pd.read_csv(variant_ids,
                                    sep="\t",
                                    comment="#",
@@ -310,7 +351,7 @@ def merge_STAAR(input_vcfs, file_prefix):
         variants.append(current_vars) # add these to our list
         purge_file(variant_ids) # save some space
 
-        matrix_file = vcf + ".STAAR.matrix.txt"
+        matrix_file = vcf + "." + file_prefix + ".STAAR.matrix.txt"
         matrix_file_list.write("/test/" + matrix_file + "\n")  # Have to do '/test/' since this will be run via Docker
 
     matrix_file_list.close()
@@ -318,7 +359,7 @@ def merge_STAAR(input_vcfs, file_prefix):
     # Deal with merging the variant frames here:
     variants_table = pd.concat(variants) # this just mashes all the dataframes in this list together...
     variants_table = variants_table.sort_values(by=["chrom", "pos"]) # ... and sorts them ...
-    variants_table.to_csv(open(file_prefix + '.variants_table.STAAR.tsv', 'w'), sep='\t') # ... and finally outpus to a csv
+    variants_table.to_csv(open(file_prefix + "." + chr + '.variants_table.STAAR.tsv', 'w'), sep='\t') # ... and finally outpus to a csv
 
     # need to make sure we found a sample file. Shouldn't be a problem...
     if sample_file is None:
@@ -333,16 +374,18 @@ def merge_STAAR(input_vcfs, file_prefix):
     # And generates one output:
     # 1. A .rds file that can be read back into STAAR during mrcepid-runassociationtesting
     cmd = "Rscript /prog/buildSTAARmatrix.R /test/%s /test/%s /test/%s %s" % \
-          (sample_file, file_prefix + '.variants_table.STAAR.tsv', 'matrix_files.txt', file_prefix)
+          (sample_file, file_prefix + "." + chr + '.variants_table.STAAR.tsv', 'matrix_files.' + chr + '.txt', file_prefix + '.' + chr)
     run_cmd(cmd, True)
 
 
 @dxpy.entry_point('main')
-def main(input_vcf_list, file_prefix):
+def main(input_vcf_list, file_prefix, threads):
 
     # Bring our docker image into our environment so that we can run commands we need:
     cmd = "docker pull egardner413/mrcepid-associationtesting:latest"
     run_cmd(cmd)
+
+    print("Docker loaded")
 
     # Ingest the list file into this AWS instance
     dxvcf = dxpy.DXFile(input_vcf_list)
@@ -361,24 +404,34 @@ def main(input_vcf_list, file_prefix):
             # Make a DXFile object out of the file handle and download it
             current_vcf_pack = dxpy.DXFile(line)
             local_name = current_vcf_pack.describe()['name'] # get the actual name of the file
-            dxpy.download_dxfile(dxid=current_vcf_pack.get_id(),
-                                 filename=local_name)
 
-            # Extract contents of the tarball into the root directory:
-            tar = tarfile.open(local_name)
-            tar.extractall()
-            tar.close()
+            input_vcfs.append({'local_name': local_name, 'filehandle': line})
 
-            # And add the actual name of the VCF file to our list
-            input_vcfs.append(local_name.rstrip(".tar.gz"))
+    # Set up a Thread Pool for parellelising per-chromosome merging
+    available_workers = threads - 1
+    executor = ThreadPoolExecutor(max_workers=available_workers)
+    chromosomes = list(range(1,23)) # Is 0 based on the right coordinate...? (So does 1..22)
+    chromosomes.extend(['X','Y'])
 
-    # Here we are generating file inputs for each of the tools that we want to run in mrcepid-runannotationtesting
-    # Note that I have a function here for REGENIE – we don't run REGENIE and this is here for legacy purposes
-    # because some of the other tools (notably SAIGE) use these files as input so I am keeping for now
-    genes = merge_REGENIE(input_vcfs, file_prefix) # REGENIE
-    merge_BOLT(input_vcfs, file_prefix, genes) # BOLT
-    merge_SAIGE(file_prefix)  # For SAIGE we can use the input for REGENIE to generate bgen files
-    merge_STAAR(input_vcfs, file_prefix) # STAAR
+    # And launch the requested threads
+    future_pool = []
+    for chromosome in chromosomes:
+        chromosome = str(chromosome)
+        future_pool.append(executor.submit(run_chromosome,
+                                           chr = chromosome,
+                                           input_vcfs = input_vcfs,
+                                           file_prefix = file_prefix))
+
+    # And gather the resulting futures
+    result_pool = []
+    for future in futures.as_completed(future_pool):
+        try:
+            result_pool.append(future.result())
+        except Exception as err:
+            print("A thread failed...")
+            print(Exception, err)
+
+    print("All threads completed...")
 
     # Purpose here is to generate one tarball of all the information we need for association testing for simple I/O.
     # The only output of this applet is thus a single .tar.gz file per VCF file
