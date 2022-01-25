@@ -21,14 +21,6 @@
       "class": "string",
       "optional": false,
       "help": "A prefix describing the variant type. MUST be the same as the prefix used for input_vcf_list and when running mrcepid-collapsevariants"
-    },
-    {
-      "name": "threads",
-      "label": "number of threads available to this instance",
-      "class": "int",
-      "optional": true,
-      "default": 36,
-      "help": "Number of threads available to this instance."
     }
   ],
   "outputSpec": [

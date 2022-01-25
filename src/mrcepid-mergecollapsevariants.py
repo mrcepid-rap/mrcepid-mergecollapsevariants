@@ -11,9 +11,9 @@ import dxpy
 import subprocess
 import csv
 import json
-import pandas as pd
 import tarfile
 import glob
+import os
 from os.path import exists
 from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor
@@ -63,15 +63,15 @@ def purge_file(file: str) -> None:
 # 2. Downloads relevant annotation files
 # 3. Performs merging
 # This function is intended to be run as a 'thread' using a ThreadPoolExecutor to enable parallelisation of chromosomes
-def run_chromosome(chr: str, input_vcfs: list, file_prefix: str) -> None:
+def run_chromosome(chrom: str, input_vcfs: list, file_prefix: str) -> None:
 
-    print("Running chromosome " + chr + "...")
+    print("Running chromosome " + chrom + "...")
     # First decide which vcfs are on this chromosome...
-    current_chr_vcf_list = []
-    chr_search_string = '_c' + chr + '_'
+    current_chrom_vcf_list = []
+    chrom_search_string = '_c' + chrom + '_'
     total_files = 0
     for vcfs in input_vcfs:
-        if chr_search_string in vcfs['local_name']:
+        if chrom_search_string in vcfs['local_name']:
 
             current_vcf_pack = dxpy.DXFile(vcfs['filehandle'])
             dxpy.download_dxfile(dxid=current_vcf_pack.get_id(),
@@ -89,54 +89,85 @@ def run_chromosome(chr: str, input_vcfs: list, file_prefix: str) -> None:
             # And add the actual name of the VCF file to our list if the dummy file DOESN'T exist
             if exists(dummy_file) is False:
                 total_files+=1
-                current_chr_vcf_list.append(vcf_prefix)
+                current_chrom_vcf_list.append(vcf_prefix)
 
-    print("Total files found for %s : %i" % (chr, total_files))
+    print("Total files found for %s : %i" % (chrom, total_files))
 
-    # Here we are generating file inputs for each of the tools that we want to run in mrcepid-runannotationtesting
-    # Note that I have a function here for REGENIE – we don't run REGENIE and this is here for legacy purposes
-    # because some of the other tools (notably SAIGE) use these files as input so I am keeping for now
-    genes = merge_REGENIE(current_chr_vcf_list, file_prefix, chr) # REGENIE
-    merge_BOLT(current_chr_vcf_list, file_prefix, genes, chr) # BOLT
-    merge_SAIGE(file_prefix, chr)  # For SAIGE we can use the input for REGENIE to generate bgen files
-    merge_STAAR(current_chr_vcf_list, file_prefix, chr) # STAAR
+    if total_files > 1:
+        # Here we are generating file inputs for each of the tools that we want to run in mrcepid-runannotationtesting
+        # Note that I have a function here for REGENIE – we don't run REGENIE and this is here for legacy purposes
+        # because some of the other tools (notably SAIGE) use these files as input so I am keeping for now
+        genes = merge_REGENIE(current_chrom_vcf_list, file_prefix, chrom, total_files) # REGENIE
+        merge_BOLT(current_chrom_vcf_list, file_prefix, genes, chrom) # BOLT
+        merge_SAIGE(file_prefix, chrom)  # For SAIGE we can use the input for REGENIE to generate bgen files
+        merge_STAAR(file_prefix, chrom) # STAAR
+    elif (total_files == 1):
+        # I think this can only happen for the Y chromosome, but building here as a safeguard.
+        genes = merge_REGENIE(current_chrom_vcf_list, file_prefix, chrom, total_files) # REGENIE
+        merge_BOLT(current_chrom_vcf_list, file_prefix, genes, chrom) # BOLT
+        merge_SAIGE(file_prefix, chrom)  # For SAIGE we can use the input for REGENIE to generate bgen files
+        merge_STAAR(file_prefix, chrom) # STAAR
+    else:
+        print ("No files found for chromosome " + chrom + ", excluding from final files...")
+
+    print("Chromosome " + chrom + " finished...")
 
 
 # Make REGENIE-specific input files
 # As noted below, these are not directly used as we do not run REGENIE. The outputs of this function are
 # now used as inputs for other tools
 # The primary output of this function is 5 files:
-# 1. <file_prefix>.REGENIE.annotation – a tsv of chr / pos / id / gene / annotation of ALL variants being assessed
+# 1. <file_prefix>.REGENIE.annotation – a tsv of chrom / pos / id / gene / annotation of ALL variants being assessed
 # 2. <file_prefix>.REGENIE.inclusion - a list of all possible genes (by ENST) for rare variant testing
-# 3. <file_prefix>.REGENIE.setFile - a file of ENST / chr / pos / variant IDs for all possible genes for rare variant testing
+# 3. <file_prefix>.REGENIE.setFile - a file of ENST / chrom / pos / variant IDs for all possible genes for rare variant testing
 # 4. <file_prefix>.SAIGE.groupFile.txt – similar to setFile but just ENST / variant IDs for all possible genes for rare variant testing
 # 5. <file_prefix>.REGENIE.mask – a file that just contains the "file_prefix"
-def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
+def merge_REGENIE(input_vcfs: list, file_prefix: str, chrom: str, num_files: int) -> dict:
 
-    # Make a file list for plink to merge all .pgen files into a single pgen file of the entire genome
-    # This is formated to be compatible with the --pmerge-list flag of plink2 as shown below. This is just one
-    # file per line.
-    merge_list = open('merge_list.' + chr + '.txt', 'w')
-    for vcf in input_vcfs:
-        plink_name = vcf + "." + file_prefix + ".REGENIE"
-        merge_list.write("/test/" + plink_name + "\n")
-    merge_list.close()
+    if num_files > 1:
+        # Make a file list for plink to merge all .pgen files into a single pgen file of the entire genome
+        # This is formated to be compatible with the --pmerge-list flag of plink2 as shown below. This is just one
+        # file per line.
+        merge_list = open('merge_list.' + chrom + '.txt', 'w')
+        for vcf in input_vcfs:
+            plink_name = vcf + "." + file_prefix + ".REGENIE"
+            merge_list.write("/test/" + plink_name + "\n")
+        merge_list.close()
 
-    # Run plink2 to merge all .pgen files ingested into this applet into a single .pgen file
-    cmd = "plink2 --threads 1 --pmerge-list /test/merge_list." + chr + ".txt --out /test/" + file_prefix + "." + chr + ".REGENIE"
-    run_cmd(cmd, True)
-    purge_file(file_prefix + "." + chr + ".REGENIE.log")
+        # Run plink2 to merge all .pgen files ingested into this applet into a single .pgen file
+        cmd = "plink2 --threads 1 --pmerge-list /test/merge_list." + chrom + ".txt --out /test/" + file_prefix + "." + chrom + ".REGENIE"
+        run_cmd(cmd, True)
+
+        # after plink merging, purge unecessary files:
+        # Remember, the pvar/psam files get used below (in STAAR) and is purged there
+        for vcf in input_vcfs:
+            plink_name = vcf + "." + file_prefix + ".REGENIE"
+            purge_file(plink_name + ".pgen")
+            purge_file(plink_name + ".pvar")
+            purge_file(plink_name + ".pgen")
+
+        purge_file(file_prefix + "." + chrom + ".REGENIE.log")
+    else:
+        # Just 1 file, which will not work for --pmerge in plink2. Just change the file name(s) to represent the entire chromosome
+        # This is likely only possible for the Y chromosome, but just to be safe...
+        plink_name = input_vcfs[0] + "." + file_prefix + ".REGENIE"
+        cmd = "mv " + plink_name + ".psam " + file_prefix + "." + chrom + ".REGENIE.psam"
+        run_cmd(cmd)
+        cmd = "mv " + plink_name + ".pvar " + file_prefix + "." + chrom + ".REGENIE.pvar"
+        run_cmd(cmd)
+        cmd = "mv " + plink_name + ".pgen " + file_prefix + "." + chrom + ".REGENIE.pgen"
+        run_cmd(cmd)
 
     # Make a dictionary that will store information about each gene listed in annotation files
     # This will have three pieces of information:
-    # 1. Chromosome (chr)
+    # 1. Chromosome (chrom)
     # 2. Position (poss)
     # 3. Variant IDs (ids) – this field is a list of variant ID strings that include ALL variants within this gene
     genes = {}
 
     # Here we are both reading in information for each variant from individual vcf.tar.gz files AND outputting the master
     # list of all variants that will be included for rare variant burden testing
-    output_annotation = open(file_prefix + "." + chr + ".REGENIE.annotation", "w")
+    output_annotation = open(file_prefix + "." + chrom + ".REGENIE.annotation", "w")
     output_csv = csv.DictWriter(output_annotation, delimiter="\t", fieldnames=['id', 'gene', 'annotation'],
                                 extrasaction='ignore')
 
@@ -149,7 +180,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
     for vcf in input_vcfs:
         annotation_name = vcf + "." + file_prefix + ".REGENIE.annotation.txt"
         annotation_csv = csv.DictReader(open(annotation_name, 'r', newline='\n'), delimiter="\t",
-                                        fieldnames=['chr', 'pos', 'id', 'gene', 'annotation'], quoting=csv.QUOTE_NONE)
+                                        fieldnames=['chrom', 'pos', 'id', 'gene', 'annotation'], quoting=csv.QUOTE_NONE)
         # Store all variant information from the above file in the 'genes' dict
         for var in annotation_csv:
             output_csv.writerow(var)
@@ -158,16 +189,16 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
                 genes[var['gene']]['poss'].append(int(var['pos']))
                 genes[var['gene']]['ids'].append(var['id'])
             else:
-                genes[var['gene']] = {'chr': var['chr'], 'poss': [int(var['pos'])], 'ids': [var['id']]}
+                genes[var['gene']] = {'chrom': var['chrom'], 'poss': [int(var['pos'])], 'ids': [var['id']]}
 
         purge_file(annotation_name) # delete the annotation file to start freeing up space on the instance
 
     output_annotation.close()
 
     # Open file handles for output files
-    output_inclusion = open(file_prefix + "." + chr + ".REGENIE.inclusion", "w")
-    output_setfile_REGENIE = open(file_prefix + "." + chr + ".REGENIE.setfile", "w")
-    output_setfile_SAIGE = open(file_prefix + "." + chr + ".SAIGE.groupFile.txt", "w")
+    output_inclusion = open(file_prefix + "." + chrom + ".REGENIE.inclusion", "w")
+    output_setfile_REGENIE = open(file_prefix + "." + chrom + ".REGENIE.setfile", "w")
+    output_setfile_SAIGE = open(file_prefix + "." + chrom + ".SAIGE.groupFile.txt", "w")
 
     # I know this is goofy, but also just going to do the file for SAIGE here to make it simple
     # We are iterating through all possible genes and writing them to the various output files listed above
@@ -180,7 +211,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
         genes[gene]['min_poss'] = min_pos
 
         # This is the inclusion list for variant testing by REGENIE
-        output_setfile_REGENIE.write("%s\t%s\t%i\t%s\n" % (gene, genes[gene]['chr'], min_pos, ','.join(genes[gene]['ids'])))
+        output_setfile_REGENIE.write("%s\t%s\t%i\t%s\n" % (gene, genes[gene]['chrom'], min_pos, ','.join(genes[gene]['ids'])))
 
         # SAIGE needs a slightly different ID format, so set that up here and write to our file
         id_string = "\t".join(["{0}:{1}_{2}/{3}".format(*item2) for item2 in [item.replace('chr','').split(":") for item in genes[gene]['ids']]])
@@ -195,7 +226,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
     if variant_type is None:
         raise Exception("Variant type was not found!")
     else:
-        output_mask = open(file_prefix + "." + chr + ".REGENIE.mask", "w")
+        output_mask = open(file_prefix + "." + chrom + ".REGENIE.mask", "w")
         output_mask.write("Mask1 " + variant_type)
         output_mask.close()
 
@@ -205,7 +236,7 @@ def merge_REGENIE(input_vcfs: list, file_prefix: str, chr: str) -> dict:
 
 # Make BOLT-specific input files
 # The primary output of this function is a bgen format file (with associated .sample file)
-def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str) -> None:
+def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chrom: str) -> None:
 
     # Step 1 is to walk through each .json file created in mrcepid-collapsevariants and mash them together in a loop
     merged_json = {}
@@ -216,8 +247,8 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str
 
     # Now loop through each of the individual vcf .json files:
     # These .json files have a structure like:
-    # {'sample1': {'eid': '0123456', 'gene1': 1}, 'sample2': {'eid': '1234567'}, 'sample3': {'eid': '2345678', 'gene2': 1}}
-    # Note that ALL samples are listed, even if they did not have a qualifying variant
+    # {'sample1': {'gene1': 1}, 'sample3': {'gene2': 1}}
+    # Note that only samples with a qualifying variant are listed
     for vcf in input_vcfs:
 
         json_file = vcf + "." + file_prefix + ".BOLT.json"
@@ -226,54 +257,67 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str
             merged_json = loaded_json # If we are looping the first time through, we don't need to append and can just read directory into memory
             for sample in merged_json: # BUT we do need to get genes out of the first json – shouldn't take long
                 for gene in merged_json[sample]:
-                    if gene != "eid" and gene not in genes:
+                    if gene not in genes:
                         genes.add(gene)
         else:
             for sample in loaded_json:
                 # This is because we store eids within the dictionary, so samples w/vars will have a size > 1, so no
                 # need to proceed if the dict only has an eid and nothing else:
-                if len(loaded_json[sample]) > 1:
-                    # Now iterate through each gene for a given sample...
-                    for gene in loaded_json[sample]:
-                        # ... and add it to the genes dict we created for documentation purposes
-                        if gene != "eid" and gene not in genes:
-                            genes.add(gene)
 
-                        # ... and add the sample / gene pair to our final dict
-                        if gene != 'eid' and gene in merged_json[sample]:
+                for gene in loaded_json[sample]:
+                    # ... and add it to the genes dict we created for documentation purposes
+                    if gene not in genes:
+                        genes.add(gene)
+                    # ... and add the sample / gene pair to our final dict
+                    if sample in merged_json:
+                        if gene in merged_json[sample]:
                             merged_json[sample][gene] += loaded_json[sample][gene]
-                        elif gene != 'eid' and gene not in merged_json[sample]:
+                        elif gene not in merged_json[sample]:
                             merged_json[sample][gene] = loaded_json[sample][gene]
+                    else:
+                        merged_json[sample] = {gene: loaded_json[sample][gene]}
 
-        purge_file(json_file)  ## clear up storage
+        purge_file(json_file)  # clear up storage
 
     # We have to write this first into plink .ped format and then convert to bgen for input into BOLT
     # We are tricking BOLT here by setting the individual "variants" within bolt to genes. So our map file
     # will be a set of genes, and if an individual has a qualifying variant within that gene, setting it to that value
-    output_map = open(file_prefix + "." + chr + '.BOLT.map', 'w')
-    output_ped = open(file_prefix + "." + chr + '.BOLT.ped', 'w')
-    output_fam = open(file_prefix + "." + chr + '.BOLT.fam', 'w')
+    output_map = open(file_prefix + "." + chrom + '.BOLT.map', 'w')
+    output_ped = open(file_prefix + "." + chrom + '.BOLT.ped', 'w')
+    output_fam = open(file_prefix + "." + chrom + '.BOLT.fam', 'w')
     header = ['eid', 'eid'] + list(genes)
 
     # Make map file (just list of genes with the chromosome and start position of that gene):
     for gene in genes:
-        output_map.write("%s %s 0 %i\n" % (REGENIE_genes[gene]['chr'],
+        output_map.write("%s %s 0 %i\n" % (REGENIE_genes[gene]['chrom'],
                                            gene,
                                            REGENIE_genes[gene]['min_poss']))
 
     # Make ped / fam files:
     # ped files are coded with dummy genotypes of A A as a ref individual and A C as a carrier
-    for sample in merged_json:
+
+    # We first need a list of samples we expect to be in this file. We can get this from the REGENIE .psam
+    sample_file = csv.DictReader(open(file_prefix + "." + chrom + '.REGENIE.psam', 'r', newline='\n'),
+                                 delimiter="\t",
+                                 quoting=csv.QUOTE_NONE)
+    for sample in sample_file:
+        sample = sample['#IID']
         output_ped.write("%s %s 0 0 0 -9 " % (sample, sample))
         output_fam.write("%s %s 0 0 0 -9\n" % (sample, sample))
         genes_processed = 0
         for gene in genes:
             genes_processed += 1 # This is a helper value to make sure we end rows on a carriage return (\n)
-            if gene in merged_json[sample]:
-                if genes_processed == len(genes):
-                    output_ped.write("A C\n")
+            if sample in merged_json:
+                if gene in merged_json[sample]:
+                    if genes_processed == len(genes):
+                        output_ped.write("A C\n")
+                    else:
+                        output_ped.write("A C ")
                 else:
-                    output_ped.write("A C ")
+                    if genes_processed == len(genes):
+                        output_ped.write("A A\n")
+                    else:
+                        output_ped.write("A A ")
             else:
                 if genes_processed == len(genes):
                     output_ped.write("A A\n")
@@ -286,120 +330,150 @@ def merge_BOLT(input_vcfs: list, file_prefix: str, REGENIE_genes: dict, chr: str
 
     # And convert to bgen
     # Have to use OG plink to get into .bed format first
-    cmd = 'plink --threads 1 --make-bed --file /test/' + file_prefix + "." + chr + '.BOLT --out /test/' + file_prefix + "." + chr + '.BOLT'
+    cmd = 'plink --threads 1 --make-bed --file /test/' + file_prefix + "." + chrom + '.BOLT --out /test/' + file_prefix + "." + chrom + '.BOLT'
     run_cmd(cmd, True)
     # And then use plink2 to make a bgen file
-    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --bfile /test/" + file_prefix + "." + chr + ".BOLT --out /test/" + file_prefix + "." + chr + ".BOLT"
+    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --bfile /test/" + file_prefix + "." + chrom + ".BOLT --out /test/" + file_prefix + "." + chrom + ".BOLT"
     run_cmd(cmd, True)
 
     # Here we also create the bgen file for doing per-marker tests. This is the easy bit...
-    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --pfile /test/" + file_prefix + "." + chr + ".REGENIE --out /test/" + file_prefix + "." + chr + ".BOLT.markers"
+    cmd = "plink2 --threads 1 --export bgen-1.2 'bits='8 --pfile /test/" + file_prefix + "." + chrom + ".REGENIE --out /test/" + file_prefix + "." + chrom + ".BOLT.markers"
     run_cmd(cmd, True)
 
+    # Need to fix the resulting sample file and I can't figure out how to do it with plink
+    with open(file_prefix + "." + chrom + ".BOLT.markers.sample", 'r') as sample_file:
+        sample_csv = csv.DictReader(sample_file, delimiter = " ")
+        fixed_sample = open(chrom + ".fixed.sample", 'w')
+        fixed_csv = csv.DictWriter(fixed_sample,fieldnames = sample_csv.fieldnames, delimiter = " ")
+        fixed_csv.writeheader()
+        for sample in sample_csv:
+            sample['ID_1'] = sample['ID_2']
+            fixed_csv.writerow(sample)
+        fixed_sample.close()
+
+    cmd = "mv " + chrom + ".fixed.sample " + file_prefix + "." + chrom + ".BOLT.markers.sample"
+    run_cmd(cmd)
+
     # Purge unecessary intermediate files to save space on the AWS instance:
-    purge_file(file_prefix + "." + chr + '.BOLT.ped')
-    purge_file(file_prefix + "." + chr + '.BOLT.map')
-    purge_file(file_prefix + "." + chr + '.BOLT.fam')
-    purge_file(file_prefix + "." + chr + '.BOLT.bed')
-    purge_file(file_prefix + "." + chr + '.BOLT.bim')
-    purge_file(file_prefix + "." + chr + '.BOLT.log')
+    purge_file(file_prefix + "." + chrom + '.BOLT.ped')
+    purge_file(file_prefix + "." + chrom + '.BOLT.map')
+    purge_file(file_prefix + "." + chrom + '.BOLT.fam')
+    purge_file(file_prefix + "." + chrom + '.BOLT.bed')
+    purge_file(file_prefix + "." + chrom + '.BOLT.bim')
+    purge_file(file_prefix + "." + chrom + '.BOLT.log')
 
 
 # Make BOLT-specific input files
-# Remember, all we do here is write the bgen file for SAIGE from the REGENIE plink2 files.
+# Remember, all we do here is write the vcf file for SAIGE from the REGENIE plink2 files.
 # The actual gene-wise information for SAIGE is done above in the REGENIE section
 # The primary output of this function is a vcf file and associated .csi index
-def merge_SAIGE(file_prefix: str, chr: str) -> None:
+def merge_SAIGE(file_prefix: str, chrom: str) -> None:
 
     # Convert the REGENIE pfile that we created into a VCF format file that SAIGE can use
-    cmd = "plink2 --threads 1 --pfile /test/" + file_prefix + "." + chr + ".REGENIE --export vcf --out /test/" + file_prefix + "." + chr + ".SAIGE"
+    cmd = "plink2 --threads 1 --pfile /test/" + file_prefix + "." + chrom + ".REGENIE --export bcf --out /test/" + file_prefix + "." + chrom + ".SAIGE"
     run_cmd(cmd, True)
-    purge_file(file_prefix + "." + chr + '.SAIGE.log')
+    purge_file(file_prefix + "." + chrom + '.SAIGE.log')
 
-    # bgzip...
-    cmd = "bgzip " + file_prefix + "." + chr + ".SAIGE.vcf"
-    run_cmd(cmd)
-
-    # ... and index!
-    cmd = "bcftools index /test/" + file_prefix + "." + chr + ".SAIGE.vcf.gz"
+    # index!
+    cmd = "bcftools index /test/" + file_prefix + "." + chrom + ".SAIGE.bcf"
     run_cmd(cmd, True)
 
 
-# Make STAAR-specific input files
-# The primary output of this function is a single R rds format file of the format <file_prefix>.STAAR.matrix.rds
-# The goal of this script is to make inputs that can be provided to a script (at /resources/usr/bin/buildSTAARmatrix.R)
-# to make the single matrix for STAAR-based rare variant burden testing
-def merge_STAAR(input_vcfs, file_prefix, chr: str):
+def merge_STAAR(file_prefix:str, chrom: str) -> None:
 
-    # First we need a sorted set of variants across all VCFs
-    iteration_num = 1
-    sample_file = None
-    variants = [] # This will be a list of pandas data frames that we concat together
-    matrix_file_list = open('matrix_files.' + chr + '.txt', 'w') # iteratively write a list of matrix files so that we can read them in later
+    # First create a dictionary of sample row numbers
+    samples = {}
+    samples_dict_file = file_prefix + "." + chrom + '.samples.tsv'
+    with open(samples_dict_file, 'w') as samples_dict_writer:
+        samples_dict_writer.write('sampID\trow\n')
+        sample_file = csv.DictReader(open(file_prefix + "." + chrom + '.REGENIE.psam', 'r', newline='\n'),
+                                     delimiter="\t",
+                                     quoting=csv.QUOTE_NONE)
+        row_num = 1
+        for sample in sample_file:
+            samples[sample['#IID']] = row_num
+            samples_dict_writer.write('%s\t%i\n' % (sample['#IID'], row_num))
+            row_num+=1
+        samples_dict_writer.close()
 
-    for vcf in input_vcfs:
-        # On the first iteration (iteration_num == 1), take this opportunity to grab a sample file to use for the rows
-        # of the merged matrix:
-        # I can get this from the REGENIE .psam file
-        if iteration_num == 1:
-            sample_file = vcf + "." + file_prefix + ".REGENIE.psam"
-            iteration_num += 1
+    # ... Then a dictionary of variant column IDs
+    # This file is also saved for runassociationtesting
+    variants = {}
+    variants_dict_file = file_prefix + "." + chrom + '.variants_table.STAAR.tsv'
+    with open(variants_dict_file, 'w') as variants_dict_writer:
+        variants_file = open(file_prefix + "." + chrom + '.REGENIE.pvar', 'r', newline='\n')
+        # This for loop just allows the csv.DictReader to skip the comment rows (marked by '##') in the .pvar file
+        # The first line that it ACTUALLY doesn't match is the real header (starting with '#CHROM'). So the first
+        # line the csv.DictReader hits is the first variant
+        for var in variants_file:
+            if '##' not in var:
+                break
+        variants_dict_writer.write('varID\tchrom\tpos\tcolumn\n')
+        variants_csv = csv.DictReader(variants_file,
+                                      delimiter="\t",
+                                      quoting=csv.QUOTE_NONE,
+                                      fieldnames=["chrom", "pos", "ID", "ref", "alt", "qual", "filter", "info"])
+        row_num = 1
+        for var in variants_csv:
+            variants[var['ID']] = row_num
+            variants_dict_writer.write('%s\t%s\t%s\t%i\n' % (var['ID'], var['chrom'], var['pos'], row_num))
+            row_num += 1
+        variants_dict_writer.close()
 
-        # Now I need to ingest the lists of variants:
-        # I can get this from the REGENIE .pvar file from each .tar.gz as we iterate through them
-        # Read each in as a pandas dataframe and get the columns we actually care about
-        variant_ids = vcf + "." + file_prefix + ".REGENIE.pvar"
-        current_vars = pd.read_csv(variant_ids,
-                                   sep="\t",
-                                   comment="#",
-                                   header=None,
-                                   names=("chrom", "pos", "ID", "ref", "alt", "qual", "filter", "info"),
-                                   index_col=2)
-        current_vars = current_vars[["chrom", "pos", "info"]]
-        # Process MAF information – pvar files are identical to the first 8 VCF columns. We know that MAF is always the
-        # first entry, so I can just do a quick split with number of returns set to '1'
-        current_vars[['maf', "extra"]] = current_vars['info'].str.split(';', 1, expand=True)
-        # I then just need to strip the "AF" bit off of the resulting MAF information (just use extra again as a garbage bin)
-        current_vars[['extra', 'maf']] = current_vars['maf'].str.split('AF=', 1, expand=True)
-        # only retain the 3 columns that we need for later, chrom, pos, maf
-        current_vars = current_vars[['chrom', 'pos', 'maf']]
-        variants.append(current_vars) # add these to our list
-        purge_file(variant_ids) # save some space
+    # And then create the initial sparse matrix
+    cmd = "bcftools query -i \'GT=\"alt\"\'  -f '[%SAMPLE\\t%CHROM:%POS:%REF:%ALT\\t%GT\\n]' " \
+          "-o /test/" + file_prefix + "." + chrom + ".STAAR.matrix.txt /test/" + file_prefix + "." + chrom + ".SAIGE.bcf"
+    run_cmd(cmd, True)
 
-        matrix_file = vcf + "." + file_prefix + ".STAAR.matrix.txt"
-        matrix_file_list.write("/test/" + matrix_file + "\n")  # Have to do '/test/' since this will be run via Docker
+    # Need to get the file length of this file...
+    # This code is janky AF
+    proc = subprocess.Popen("wc -l " + file_prefix + "." + chrom + ".STAAR.matrix.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = proc.communicate()
+    file_length = stdout.decode('utf-8')
+    file_length = file_length.strip(' ').split(' ')[0]
 
-    matrix_file_list.close()
+    # And format it to R spec
+    sparse_matrix = csv.DictReader(open(file_prefix + '.' + chrom + '.STAAR.matrix.txt', 'r'), delimiter="\t",quoting=csv.QUOTE_NONE,fieldnames=["sample","variant","gt"])
+    matrix_file = file_prefix + "." + chrom + '.STAAR.matrix.R.txt'
+    with open(matrix_file, 'w') as matrix_file_writer:
+        # Write the header in %MatrixMarket format
+        matrix_file_writer.write('%%MatrixMarket matrix coordinate integer general\n')
+        matrix_file_writer.write('%i %i %s\n' % (len(samples), len(variants), file_length))
+        # Write the individual cells in the matrix
+        for row in sparse_matrix:
+            gt_val = 1 if row['gt'] == '0/1' else 2
+            matrix_file_writer.write('%s %s %s\n' % (samples[row['sample']], variants[row['variant']], gt_val))
+        matrix_file_writer.close()
 
-    # Deal with merging the variant frames here:
-    variants_table = pd.concat(variants) # this just mashes all the dataframes in this list together...
-    variants_table = variants_table.sort_values(by=["chrom", "pos"]) # ... and sorts them ...
-    variants_table.to_csv(open(file_prefix + "." + chr + '.variants_table.STAAR.tsv', 'w'), sep='\t') # ... and finally outpus to a csv
-
-    # need to make sure we found a sample file. Shouldn't be a problem...
-    if sample_file is None:
-        raise Exception("Samples file could not be retrieved...")
-
-    # Now run the actual R script to make the final genotype matrix...
+    # And then run the R script `buildSTAARmatrix.R` to properly attach row and column names and save in .RDS format
+    # for quick read/write in later parts of the pipeline.
     # See the script itself for how it works, but it takes 4 inputs:
-    # 1. Samples file (*.psam) – the rows of our final matrix
-    # 2. Our list of variants – the columns of our final matrix
-    # 3. list of matrix files – the cells in our final matrix
-    # 4. prefix – the prefix for the name of the final file
+    # 1. Samples dict (samples_dict_file above) – the row names of our final matrix
+    # 2. Variants dict (variants_dict_file above) – the column names of our final matrix
+    # 3. Matrix file (matrix_file above) – the cells in our final matrix, formatted in %MatrixMarket format for easy read
+    # 4. Out file – The name of the .rds file for final output
     # And generates one output:
-    # 1. A .rds file that can be read back into STAAR during mrcepid-runassociationtesting
-    cmd = "Rscript /prog/buildSTAARmatrix.R /test/%s /test/%s /test/%s %s" % \
-          (sample_file, file_prefix + "." + chr + '.variants_table.STAAR.tsv', 'matrix_files.' + chr + '.txt', file_prefix + '.' + chr)
+    # 1. A .rds file (named by out file) that can be read back into STAAR during mrcepid-runassociationtesting
+    cmd = "Rscript /prog/buildSTAARmatrix.R /test/%s /test/%s /test/%s /test/%s" % \
+          (samples_dict_file, variants_dict_file, matrix_file, file_prefix + '.' + chrom + '.STAAR.matrix.rds')
     run_cmd(cmd, True)
+
+    # Remove intermediate files so they aren't stored in the final tar:
+    purge_file(samples_dict_file)
+    purge_file(matrix_file)
+    purge_file(file_prefix + "." + chrom + ".STAAR.matrix.txt")
 
 
 @dxpy.entry_point('main')
-def main(input_vcf_list, file_prefix, threads):
+def main(input_vcf_list, file_prefix):
+
+    # Get threads available to this instance
+    threads = os.cpu_count()
+    print('Number of threads available: %i' % threads)
 
     # Bring our docker image into our environment so that we can run commands we need:
     cmd = "docker pull egardner413/mrcepid-associationtesting:latest"
     run_cmd(cmd)
-
     print("Docker loaded")
 
     # Ingest the list file into this AWS instance
@@ -430,7 +504,7 @@ def main(input_vcf_list, file_prefix, threads):
     future_pool = []
     for chromosome in CHROMOSOMES:
         future_pool.append(executor.submit(run_chromosome,
-                                           chr = chromosome,
+                                           chrom = chromosome,
                                            input_vcfs = input_vcfs,
                                            file_prefix = file_prefix))
 
@@ -442,6 +516,7 @@ def main(input_vcf_list, file_prefix, threads):
         except Exception as err:
             print("A thread failed...")
             print(Exception, err)
+            raise dxpy.AppError("A chromosome failed to run properly...")
 
     print("All threads completed...")
 
