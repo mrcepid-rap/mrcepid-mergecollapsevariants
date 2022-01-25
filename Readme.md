@@ -107,7 +107,7 @@ This applet does not have any external dependencies.
 
 ## Methodology
 
-This applet is step 4 (mrc-mergecollapsevariants) of the rare variant testing pipeline developed by Eugene Gardner for the UKBiobank
+This applet is step 5 (mrc-mergecollapsevariants) of the rare variant testing pipeline developed by Eugene Gardner for the UKBiobank
 RAP at the MRC Epidemiology Unit:
 
 ![](https://github.com/mrcepid-rap/.github/blob/main/images/RAPPipeline.png)
