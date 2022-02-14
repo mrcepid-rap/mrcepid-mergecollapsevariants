@@ -441,7 +441,7 @@ def merge_STAAR(file_prefix:str, chrom: str) -> None:
         matrix_file_writer.write('%i %i %s\n' % (len(samples), len(variants), file_length))
         # Write the individual cells in the matrix
         for row in sparse_matrix:
-            gt_val = 1 if row['gt'] == '0/1' else 2
+            gt_val = 1 if (row['gt'] == '0/1' or row['gt'] == '1/.' or row['gt'] == './1') else 2
             matrix_file_writer.write('%s %s %s\n' % (samples[row['sample']], variants[row['variant']], gt_val))
         matrix_file_writer.close()
 
